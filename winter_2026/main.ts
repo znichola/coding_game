@@ -48,8 +48,6 @@ type Command = MoveCommand | MarkCommand | WaitCommand;
 
 // ── Validation ────────────────────────────────────────────────────────────────
 
-const DIRECTIONS = new Set<Direction>(['UP', 'DOWN', 'LEFT', 'RIGHT']);
-
 function validateCommand(
     cmd: Command,
     mySnakeIds: number[],
@@ -81,8 +79,6 @@ function dispatch(
     width: number,
     height: number,
 ): void {
-    // console.error("DISPATCHING COMMANDS:");
-    // console.error(commands);
     const actions = commands.filter(cmd => validateCommand(cmd, mySnakeIds, activeSnakeIds, width, height))
         .filter(cmd => cmd.kind !== 'WAIT');
     console.log((actions.length > 0 ? actions : [{ kind: 'WAIT' } as WaitCommand]).map(serializeCommand).join(';'));
@@ -123,6 +119,23 @@ function isTraversable(
     if (board[y][x].content === CellContent.MySnake) return false;
     if (board[y][x].content === CellContent.OppSnake) return false;
     return true;
+}
+
+/** Returns true if (x,y) would provide support to `snakeId` — i.e. it is
+ *  out-of-bounds, a wall, or another snake's body. A snake's own body cells
+ *  are transparent: a snake cannot rest on itself. */
+function isSupportingGround(
+    x: number, y: number,
+    snakeId: number,
+    staticMap: StaticCell[][],
+    board: Cell[][]
+): boolean {
+    if (staticMap[y][x] === StaticCell.Wall) return true;
+    const cell = board[y][x];
+    if (cell.content === CellContent.MySnake  && cell.snakebotId !== snakeId) return true;
+    if (cell.content === CellContent.OppSnake) return true;
+    if (cell.content === CellContent.PowerSource) return true;
+    return false;
 }
 
 // ── Init (runs once) ─────────────────────────────────────────────────────────
@@ -213,37 +226,36 @@ while (true) {
 
 function algo(state: GameState, currentSnake: Snakebot): Command[] {
     const head = currentSnake.body[0];
-
-    // Sort candidates by proximity, simulate each, pick the closest reachable one
+    const isWalkable = (p: Point) => isTraversable(p.x, p.y, staticMap, state.board);
+    const maxDepth = Math.min(turnsLeft, 6);
+ 
+    // Sort candidates by proximity
     const candidates = [...state.powerSources].sort((a, b) =>
         Math.hypot(a.x - head.x, a.y - head.y) - Math.hypot(b.x - head.x, b.y - head.y)
     );
-
+ 
     for (const target of candidates) {
-        const result = simulatePath(state, currentSnake, target, staticMap);
-        if (!result) {
-            console.error(`[ALGO] Target (${target.x},${target.y}) is unreachable or fatal, skipping.`);
+        // A* pre-filter: cheap physics-blind reachability check — skip hard dead-ends early
+        const quickPath = aStar(head, target, isWalkable);
+        if (!quickPath) {
+            console.error(`[ALGO] Target (${target.x},${target.y}) not reachable by A*, skipping.`);
             continue;
         }
-
-        // Target is viable — compute first step toward it
-        const isWalkable = (p: Point) => isTraversable(p.x, p.y, staticMap, state.board);
-        const path = aStar(head, target, isWalkable);
-        if (!path || path.length < 2) continue;
-
-        const next = path[1];
-        const dx = next.x - head.x;
-        const dy = next.y - head.y;
-        const direction: Direction =
-            dx === 1 ? 'RIGHT' :
-                dx === -1 ? 'LEFT' :
-                    dy === 1 ? 'DOWN' : 'UP';
-
-        return [{ kind: 'MOVE', snakebotId: currentSnake.id, direction }];
+ 
+        // Physics-aware A*: accounts for body movement and gravity.
+        // Always returns a path — exact if goal reached within budget, partial otherwise.
+        const directions = physicsAStar(state, currentSnake, target, staticMap, maxDepth);
+        if (directions.length === 0) {
+            console.error(`[ALGO] Target (${target.x},${target.y}) not reachable within depth budget, skipping.`);
+            continue;
+        }
+        return [{ kind: 'MOVE', snakebotId: currentSnake.id, direction: directions[0] }];
     }
+ 
+    // No candidates passed the A* pre-filter — fall back to survival
     return avoidDeath(state, currentSnake);
-    // return []; // all targets fatal — dispatcher will emit WAIT
 }
+
 // ── A* Pathfinding ────────────────────────────────────────────────────────────
 
 type AStarNode = {
@@ -254,9 +266,9 @@ type AStarNode = {
     parent: AStarNode | null;
 };
 
-
+/** Manhattan distance */ 
 function heuristic(a: Point, b: Point): number {
-    return Math.abs(a.x - b.x) + Math.abs(a.y - b.y); // Manhattan distance
+    return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
 }
 
 function reconstructPath(node: AStarNode): Point[] {
@@ -267,8 +279,9 @@ function reconstructPath(node: AStarNode): Point[] {
 }
 
 /**
- * Returns the full path from `start` to `goal` (inclusive), or null if unreachable.
- * Treats walls and occupied cells as impassable via the provided `isWalkable` predicate.
+ * Physics-blind reachability pre-filter. Returns a path if the goal is
+ * reachable on a static board snapshot, or null if clearly blocked.
+ * Do not use this for actual move decisions — use bfsPath instead.
  */
 function aStar(
     start: Point,
@@ -316,58 +329,84 @@ function aStar(
 }
 
 
-// ── State-Space BFS ───────────────────────────────────────────────────────────
-
+// ── Physics-Aware A* ──────────────────────────────────────────────────────────
+ 
 type SearchNode = {
-    state: GameState;
-    snake: Snakebot;
-    path: Direction[];  // directions taken to reach this node
+    state:  GameState;
+    snake:  Snakebot;
+    path:   Direction[];  // directions taken to reach this node
+    g:      number;       // steps taken so far
+    h:      number;       // manhattan distance to goal
 };
-
+ 
 function bodyHash(snake: Snakebot): string {
     return snake.body.map(p => `${p.x},${p.y}`).join(':');
 }
-
+ 
 /**
- * BFS over the full snake state-space, applying gravity after every move.
- * Returns the sequence of directions to reach `goal`, or null if unreachable.
- * Replaces aStar for path planning — accounts for body movement and gravity.
+ * Physics-aware A* over the full snake state-space. At every node it applies
+ * advanceSnake + applyGravity so body movement and falling are accounted for.
+ *
+ * Ordered by f = g + h (A* best-first), so the depth budget is spent on the
+ * most promising states rather than exhausting all equidistant ones first.
+ *
+ * Always returns a path — either to the goal (exact), or to the closest state
+ * reached within `maxDepth` (partial). Never returns null; the A* pre-filter
+ * in algo() is responsible for ruling out hard unreachability before calling.
  */
-function bfsPath(
-    state: GameState,
-    snake: Snakebot,
-    goal: Point,
+function physicsAStar(
+    state:     GameState,
+    snake:     Snakebot,
+    goal:      Point,
     staticMap: StaticCell[][],
-    maxDepth: number,
-): Direction[] | null {
+    maxDepth:  number,
+): Direction[] {
+    const DIRS: Direction[] = ['UP', 'DOWN', 'LEFT', 'RIGHT'];
     const visited = new Set<string>();
-    const queue: SearchNode[] = [{ state, snake, path: [] }];
+ 
+    const startH = heuristic(snake.body[0], goal);
+    const open: SearchNode[] = [{ state, snake, path: [], g: 0, h: startH }];
     visited.add(bodyHash(snake));
-
-    while (queue.length > 0) {
-        const { state: curState, snake: curSnake, path } = queue.shift()!;
-
-        if (path.length >= maxDepth) continue;
-
-        for (const direction of DIRECTIONS) {
-            const advResult = advanceSnake(curState, curSnake, direction, staticMap);
+ 
+    // Tracks the closest state seen so we can return a best partial path
+    let best: SearchNode = open[0];
+ 
+    while (open.length > 0) {
+        // Pop lowest f = g + h  (simple linear scan — fine for small maxDepth)
+        const idx     = open.reduce((bi, _, i) =>
+            (open[i].g + open[i].h) < (open[bi].g + open[bi].h) ? i : bi, 0);
+        const current = open.splice(idx, 1)[0];
+ 
+        // Keep track of the closest state reached anywhere in the search
+        if (current.h < best.h) best = current;
+ 
+        // Goal reached — return immediately
+        if (current.h === 0) return current.path;
+ 
+        // Depth budget exhausted for this branch
+        if (current.g >= maxDepth) continue;
+ 
+        for (const direction of DIRS) {
+            const advResult = advanceSnake(current.state, current.snake, direction, staticMap);
             if (!advResult.ok) continue;
-
-            const { state: nextState, snake: nextSnake } = applyGravity(advResult.state, advResult.snake, staticMap);
-            const nextPath = [...path, direction];
-            const head = nextSnake.body[0];
-
-            if (head.x === goal.x && head.y === goal.y) return nextPath;
-
+ 
+            const { state: nextState, snake: nextSnake } =
+                applyGravity(advResult.state, advResult.snake, staticMap);
+ 
             const hash = bodyHash(nextSnake);
             if (visited.has(hash)) continue;
             visited.add(hash);
-
-            queue.push({ state: nextState, snake: nextSnake, path: nextPath });
+ 
+            const nextPath = [...current.path, direction];
+            const h        = heuristic(nextSnake.body[0], goal);
+ 
+            open.push({ state: nextState, snake: nextSnake, path: nextPath, g: current.g + 1, h });
         }
     }
-
-    return null;
+ 
+    // Budget exhausted — return path to closest state reached
+    console.error(`[PHYSICS_ASTAR] Depth budget exhausted, returning best partial path (h=${best.h})`);
+    return best.path;
 }
 
 // ── Board Simulation ──────────────────────────────────────────────────────────
@@ -395,10 +434,6 @@ type AdvanceResult =
     | { ok: true; state: GameState; snake: Snakebot }
     | { ok: false; reason: 'wall' | 'self' | 'opponent' | 'out_of_bounds' };
 
-/**
- * Advances a single snake one step in `direction` within a cloned state.
- * Returns the new state + updated snake on success, or a failure reason.
- */
 function advanceSnake(
     state: GameState,
     snake: Snakebot,
@@ -414,7 +449,6 @@ function advanceSnake(
     };
     const next = { x: head.x + deltas[direction].x, y: head.y + deltas[direction].y };
 
-    // Validate move
     if (next.y < 0 || next.y >= staticMap.length || next.x < 0 || next.x >= staticMap[0].length)
         return { ok: false, reason: 'out_of_bounds' };
     if (staticMap[next.y][next.x] === StaticCell.Wall)
@@ -424,23 +458,18 @@ function advanceSnake(
     if (cell.content === CellContent.MySnake) return { ok: false, reason: 'self' };
     if (cell.content === CellContent.OppSnake) return { ok: false, reason: 'opponent' };
 
-    // Clone and mutate
     const sim = cloneState(state);
     const simSnake = (snake.owner === 'me' ? sim.mySnakes : sim.oppSnakes).get(snake.id)!;
 
-    // Erase tail from board before moving (snake slides forward)
     const tail = simSnake.body[simSnake.body.length - 1];
     sim.board[tail.y][tail.x] = { content: CellContent.Empty, snakebotId: null };
 
-    // Grow into new head
     simSnake.body.unshift(next);
     simSnake.body.pop();
 
-    // Check if we collected a power source
     const psIndex = sim.powerSources.findIndex(ps => ps.x === next.x && ps.y === next.y);
     if (psIndex !== -1) sim.powerSources.splice(psIndex, 1);
 
-    // Stamp new head onto board
     const content = snake.owner === 'me' ? CellContent.MySnake : CellContent.OppSnake;
     sim.board[next.y][next.x] = { content, snakebotId: snake.id };
 
@@ -450,101 +479,48 @@ function advanceSnake(
 
 // ── Gravity ───────────────────────────────────────────────────────────────────
 
-/**
- * Drops the snake down row by row until any segment has a non-walkable cell
- * directly below it. Mutates the passed-in state clone and snake in place —
- * call this only on already-cloned data.
- */
 function applyGravity(
-    state: GameState,
-    snake: Snakebot,
+    state:     GameState,
+    snake:     Snakebot,
     staticMap: StaticCell[][],
 ): { state: GameState; snake: Snakebot } {
-    let sim = cloneState(state);
+    let sim      = cloneState(state);
     let simSnake = (snake.owner === 'me' ? sim.mySnakes : sim.oppSnakes).get(snake.id)!;
-    const isWalkable = (p: Point) => isTraversable(p.x, p.y, staticMap, sim.board);
-
+ 
     for (let i = 0; i < staticMap.length; i++) {
-        const isSupported = simSnake.body.some(p => !isWalkable({ x: p.x, y: p.y + 1 }));
+        const isSupported = simSnake.body.some(p =>
+            isSupportingGround(p.x, p.y + 1, simSnake.id, staticMap, sim.board)
+        );
         if (isSupported) break;
-
-        // Erase current positions
+ 
         for (const p of simSnake.body) {
             sim.board[p.y][p.x] = { content: CellContent.Empty, snakebotId: null };
         }
-
-        // Drop every segment one row
+ 
         for (const p of simSnake.body) p.y += 1;
-
-        // Collect any power sources landed on
+ 
         for (const p of simSnake.body) {
             const psIndex = sim.powerSources.findIndex(ps => ps.x === p.x && ps.y === p.y);
             if (psIndex !== -1) sim.powerSources.splice(psIndex, 1);
         }
-
-        // Re-stamp
+ 
         const content = snake.owner === 'me' ? CellContent.MySnake : CellContent.OppSnake;
         for (const p of simSnake.body) {
             sim.board[p.y][p.x] = { content, snakebotId: snake.id };
         }
     }
-
+ 
     return { state: sim, snake: simSnake };
 }
 
-
 /**
- * Simulates the full path from current position to `goal` step by step,
- * re-running A* after each move so the path adapts to the evolving board.
- * Returns the number of steps taken, or null if the goal is unreachable / fatal.
- */
-function simulatePath(
-    state: GameState,
-    snake: Snakebot,
-    goal: Point,
-    staticMap: StaticCell[][],
-): { steps: number; finalState: GameState } | null {
-    let sim = state;
-    let simSnake = snake;
-    let steps = 0;
-    const maxSteps = turnsLeft / 2 > 10 ? turnsLeft / 2 : turnsLeft;
-
-    while (steps < maxSteps) {
-        const head = simSnake.body[0];
-        if (head.x === goal.x && head.y === goal.y) return { steps, finalState: sim };
-
-        const isWalkable = (p: Point) => isTraversable(p.x, p.y, staticMap, sim.board);
-        const path = aStar(head, goal, isWalkable);
-        if (!path || path.length < 2) return null; // blocked or unreachable
-
-        const next = path[1];
-        const dx = next.x - head.x;
-        const dy = next.y - head.y;
-        const direction: Direction =
-            dx === 1 ? 'RIGHT' :
-                dx === -1 ? 'LEFT' :
-                    dy === 1 ? 'DOWN' : 'UP';
-
-        const advanceResult = advanceSnake(sim, simSnake, direction, staticMap);
-        if (!advanceResult.ok) return null;
-
-        const gravityResult = applyGravity(advanceResult.state, advanceResult.snake, staticMap);
-
-        sim = gravityResult.state;
-        simSnake = gravityResult.snake;
-        steps++;
-    }
-
-    return null; // exceeded step budget
-}
-
-/**
- * If no good move is found, do something that avoids death.
- * Tries all 4 directions and returns the first safe one.
- * Returns [] if all moves lead to death — dispatcher will emit WAIT.
+ * Fallback: tries all 4 directions and returns the first safe move.
+ * Returns [] if all moves are fatal — dispatcher will emit WAIT.
  */
 function avoidDeath(state: GameState, currentSnake: Snakebot): Command[] {
-    for (const direction of DIRECTIONS) {
+    const directions: Direction[] = ['UP', 'DOWN', 'LEFT', 'RIGHT'];
+
+    for (const direction of directions) {
         const result = advanceSnake(state, currentSnake, direction, staticMap);
         if (result.ok) return [{ kind: 'MOVE', snakebotId: currentSnake.id, direction }];
     }
