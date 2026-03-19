@@ -57,8 +57,8 @@ function validateCommand(
     width: number,
     height: number,
 ): boolean {
-    if (cmd.kind === 'MOVE' && (!mySnakeIds.includes(cmd.snakebotId) || !activeSnakeIds.has(cmd.snakebotId))) {console.error(`[DISPATCH] Illegal MOVE: snakebot ${cmd.snakebotId} is not yours or not alive.`); return false;}
-    if (cmd.kind === 'MARK' && (cmd.x < 0 || cmd.x >= width || cmd.y < 0 || cmd.y >= height)) {console.error(`[DISPATCH] Illegal MARK: (${cmd.x},${cmd.y}) is out of bounds.`); return false;}
+    if (cmd.kind === 'MOVE' && (!mySnakeIds.includes(cmd.snakebotId) || !activeSnakeIds.has(cmd.snakebotId))) { console.error(`[DISPATCH] Illegal MOVE: snakebot ${cmd.snakebotId} is not yours or not alive.`); return false; }
+    if (cmd.kind === 'MARK' && (cmd.x < 0 || cmd.x >= width || cmd.y < 0 || cmd.y >= height)) { console.error(`[DISPATCH] Illegal MARK: (${cmd.x},${cmd.y}) is out of bounds.`); return false; }
     return true;
 }
 
@@ -84,7 +84,7 @@ function dispatch(
     console.error("DISPATCHING COMMANDS:");
     console.error(commands);
     const actions = commands.filter(cmd => validateCommand(cmd, mySnakeIds, activeSnakeIds, width, height))
-                            .filter(cmd => cmd.kind !== 'WAIT');
+        .filter(cmd => cmd.kind !== 'WAIT');
     console.log((actions.length > 0 ? actions : [{ kind: 'WAIT' } as WaitCommand]).map(serializeCommand).join(';'));
 }
 
@@ -227,13 +227,13 @@ function algo(state: GameState, currentSnake: Snakebot): Command[] {
     if (!path || path.length < 2) return [];
 
     // path[0] is current head, path[1] is next step
-    const next   = path[1];
-    const dx     = next.x - head.x;
-    const dy     = next.y - head.y;
+    const next = path[1];
+    const dx = next.x - head.x;
+    const dy = next.y - head.y;
     const direction: Direction =
-        dx ===  1 ? 'RIGHT' :
-        dx === -1 ? 'LEFT'  :
-        dy ===  1 ? 'DOWN'  : 'UP';
+        dx === 1 ? 'RIGHT' :
+            dx === -1 ? 'LEFT' :
+                dy === 1 ? 'DOWN' : 'UP';
 
     return [{ kind: 'MOVE', snakebotId: currentSnake.id, direction }];
 }
@@ -241,10 +241,10 @@ function algo(state: GameState, currentSnake: Snakebot): Command[] {
 // ── A* Pathfinding ────────────────────────────────────────────────────────────
 
 type AStarNode = {
-    point:  Point;
-    g:      number;  // cost from start
-    h:      number;  // heuristic to goal
-    f:      number;  // g + h
+    point: Point;
+    g: number;  // cost from start
+    h: number;  // heuristic to goal
+    f: number;  // g + h
     parent: AStarNode | null;
 };
 
@@ -265,14 +265,14 @@ function reconstructPath(node: AStarNode): Point[] {
  * Treats walls and occupied cells as impassable via the provided `isWalkable` predicate.
  */
 function aStar(
-    start:      Point,
-    goal:       Point,
+    start: Point,
+    goal: Point,
     isWalkable: (p: Point) => boolean,
 ): Point[] | null {
-    const NEIGHBOURS = [{x:0,y:-1},{x:0,y:1},{x:-1,y:0},{x:1,y:0}];
-    const key      = (p: Point) => `${p.x},${p.y}`;
-    const open     = new Map<string, AStarNode>();
-    const closed   = new Set<string>();
+    const NEIGHBOURS = [{ x: 0, y: -1 }, { x: 0, y: 1 }, { x: -1, y: 0 }, { x: 1, y: 0 }];
+    const key = (p: Point) => `${p.x},${p.y}`;
+    const open = new Map<string, AStarNode>();
+    const closed = new Set<string>();
 
     const startNode: AStarNode = { point: start, g: 0, h: heuristic(start, goal), f: 0, parent: null };
     startNode.f = startNode.g + startNode.h;
@@ -292,8 +292,8 @@ function aStar(
             const neighbour: Point = { x: current.point.x + delta.x, y: current.point.y + delta.y };
             const nKey = key(neighbour);
 
-            if (closed.has(nKey))                continue;
-            if (!isWalkable(neighbour))           continue;
+            if (closed.has(nKey)) continue;
+            if (!isWalkable(neighbour)) continue;
 
             const g = current.g + 1;
             const existing = open.get(nKey);
