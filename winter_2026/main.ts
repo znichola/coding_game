@@ -132,7 +132,7 @@ function isSupportingGround(
 ): boolean {
     if (staticMap[y][x] === StaticCell.Wall) return true;
     const cell = board[y][x];
-    if (cell.content === CellContent.MySnake  && cell.snakebotId !== snakeId) return true;
+    if (cell.content === CellContent.MySnake && cell.snakebotId !== snakeId) return true;
     if (cell.content === CellContent.OppSnake) return true;
     if (cell.content === CellContent.PowerSource) return true;
     return false;
@@ -228,12 +228,12 @@ function algo(state: GameState, currentSnake: Snakebot): Command[] {
     const head = currentSnake.body[0];
     const isWalkable = (p: Point) => isTraversable(p.x, p.y, staticMap, state.board);
     const maxDepth = Math.min(turnsLeft, 6);
- 
+
     // Sort candidates by proximity
     const candidates = [...state.powerSources].sort((a, b) =>
         Math.hypot(a.x - head.x, a.y - head.y) - Math.hypot(b.x - head.x, b.y - head.y)
     );
- 
+
     for (const target of candidates) {
         // A* pre-filter: cheap physics-blind reachability check — skip hard dead-ends early
         const quickPath = aStar(head, target, isWalkable);
@@ -241,7 +241,7 @@ function algo(state: GameState, currentSnake: Snakebot): Command[] {
             console.error(`[ALGO] Target (${target.x},${target.y}) not reachable by A*, skipping.`);
             continue;
         }
- 
+
         // Physics-aware A*: accounts for body movement and gravity.
         // Always returns a path — exact if goal reached within budget, partial otherwise.
         const directions = physicsAStar(state, currentSnake, target, staticMap, maxDepth);
@@ -251,7 +251,7 @@ function algo(state: GameState, currentSnake: Snakebot): Command[] {
         }
         return [{ kind: 'MOVE', snakebotId: currentSnake.id, direction: directions[0] }];
     }
- 
+
     // No candidates passed the A* pre-filter — fall back to survival
     return avoidDeath(state, currentSnake);
 }
@@ -266,7 +266,7 @@ type AStarNode = {
     parent: AStarNode | null;
 };
 
-/** Manhattan distance */ 
+/** Manhattan distance */
 function heuristic(a: Point, b: Point): number {
     return Math.abs(a.x - b.x) + Math.abs(a.y - b.y);
 }
@@ -330,19 +330,19 @@ function aStar(
 
 
 // ── Physics-Aware A* ──────────────────────────────────────────────────────────
- 
+
 type SearchNode = {
-    state:  GameState;
-    snake:  Snakebot;
-    path:   Direction[];  // directions taken to reach this node
-    g:      number;       // steps taken so far
-    h:      number;       // manhattan distance to goal
+    state: GameState;
+    snake: Snakebot;
+    path: Direction[];  // directions taken to reach this node
+    g: number;       // steps taken so far
+    h: number;       // manhattan distance to goal
 };
- 
+
 function bodyHash(snake: Snakebot): string {
     return snake.body.map(p => `${p.x},${p.y}`).join(':');
 }
- 
+
 /**
  * Physics-aware A* over the full snake state-space. At every node it applies
  * advanceSnake + applyGravity so body movement and falling are accounted for.
@@ -355,55 +355,55 @@ function bodyHash(snake: Snakebot): string {
  * in algo() is responsible for ruling out hard unreachability before calling.
  */
 function physicsAStar(
-    state:     GameState,
-    snake:     Snakebot,
-    goal:      Point,
+    state: GameState,
+    snake: Snakebot,
+    goal: Point,
     staticMap: StaticCell[][],
-    maxDepth:  number,
+    maxDepth: number,
 ): Direction[] {
     const DIRS: Direction[] = ['UP', 'DOWN', 'LEFT', 'RIGHT'];
     const visited = new Set<string>();
- 
+
     const startH = heuristic(snake.body[0], goal);
     const open: SearchNode[] = [{ state, snake, path: [], g: 0, h: startH }];
     visited.add(bodyHash(snake));
- 
+
     // Tracks the closest state seen so we can return a best partial path
     let best: SearchNode = open[0];
- 
+
     while (open.length > 0) {
         // Pop lowest f = g + h  (simple linear scan — fine for small maxDepth)
-        const idx     = open.reduce((bi, _, i) =>
+        const idx = open.reduce((bi, _, i) =>
             (open[i].g + open[i].h) < (open[bi].g + open[bi].h) ? i : bi, 0);
         const current = open.splice(idx, 1)[0];
- 
+
         // Keep track of the closest state reached anywhere in the search
         if (current.h < best.h) best = current;
- 
+
         // Goal reached — return immediately
         if (current.h === 0) return current.path;
- 
+
         // Depth budget exhausted for this branch
         if (current.g >= maxDepth) continue;
- 
+
         for (const direction of DIRS) {
             const advResult = advanceSnake(current.state, current.snake, direction, staticMap);
             if (!advResult.ok) continue;
- 
+
             const { state: nextState, snake: nextSnake } =
                 applyGravity(advResult.state, advResult.snake, staticMap);
- 
+
             const hash = bodyHash(nextSnake);
             if (visited.has(hash)) continue;
             visited.add(hash);
- 
+
             const nextPath = [...current.path, direction];
-            const h        = heuristic(nextSnake.body[0], goal);
- 
+            const h = heuristic(nextSnake.body[0], goal);
+
             open.push({ state: nextState, snake: nextSnake, path: nextPath, g: current.g + 1, h });
         }
     }
- 
+
     // Budget exhausted — return path to closest state reached
     console.error(`[PHYSICS_ASTAR] Depth budget exhausted, returning best partial path (h=${best.h})`);
     return best.path;
@@ -480,36 +480,36 @@ function advanceSnake(
 // ── Gravity ───────────────────────────────────────────────────────────────────
 
 function applyGravity(
-    state:     GameState,
-    snake:     Snakebot,
+    state: GameState,
+    snake: Snakebot,
     staticMap: StaticCell[][],
 ): { state: GameState; snake: Snakebot } {
-    let sim      = cloneState(state);
+    let sim = cloneState(state);
     let simSnake = (snake.owner === 'me' ? sim.mySnakes : sim.oppSnakes).get(snake.id)!;
- 
+
     for (let i = 0; i < staticMap.length; i++) {
         const isSupported = simSnake.body.some(p =>
             isSupportingGround(p.x, p.y + 1, simSnake.id, staticMap, sim.board)
         );
         if (isSupported) break;
- 
+
         for (const p of simSnake.body) {
             sim.board[p.y][p.x] = { content: CellContent.Empty, snakebotId: null };
         }
- 
+
         for (const p of simSnake.body) p.y += 1;
- 
+
         for (const p of simSnake.body) {
             const psIndex = sim.powerSources.findIndex(ps => ps.x === p.x && ps.y === p.y);
             if (psIndex !== -1) sim.powerSources.splice(psIndex, 1);
         }
- 
+
         const content = snake.owner === 'me' ? CellContent.MySnake : CellContent.OppSnake;
         for (const p of simSnake.body) {
             sim.board[p.y][p.x] = { content, snakebotId: snake.id };
         }
     }
- 
+
     return { state: sim, snake: simSnake };
 }
 
