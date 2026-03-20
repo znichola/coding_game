@@ -231,8 +231,8 @@ while (true) {
     if (id == 2) {
         const testDir: Direction = 'UP'; // change to whatever direction you're sending
 
+        const candidateMoves = getCandidateMoves([snake], staticMap);
         const afterMove = applyJointAction([snake], new Map([[snake.id, testDir]]), state.powerSources, staticMap);
-        console.error("After join action", afterMove);
     }
     // ─────────────────────────────────────────────────────────────────────────────
 
@@ -282,10 +282,6 @@ function algo(state: GameState, currentSnake: Snakebot): Command[] {
 }
 
 // ── A* Pathfinding ────────────────────────────────────────────────────────────
-
-function heuristic(a: Point, b: Point): number {
-    return Math.abs(a.x - b.x) + Math.abs(a.y - b.y); // Manhattan distance
-}
 
 function reconstructPath(node: AStarNode): Point[] {
     const path: Point[] = [];
@@ -352,6 +348,60 @@ function aStar(
     return null; // no path found
 }
 
+// ── Heuristic & Scoring ────────────────────────────────────────────────────────
+
+function heuristic(a: Point, b: Point): number {
+    return Math.abs(a.x - b.x) + Math.abs(a.y - b.y); // Manhattan distance
+}
+
+function score(snake: Snakebot, powerSources: Point[]): number {
+    let best = Infinity;
+    for (let i = 0; i < powerSources.length; i++) {
+        const d = heuristic(snake.body[0], powerSources[i]);
+        if (d < best) best = d;
+    }
+    return -best;
+}
+
+// ── Candidate Moves ───────────────────────────────────────────────────────────
+
+type CandidateMoves = Map<number, Direction[]>;
+
+function getCandidateMoves(
+    allSnakes: Snakebot[],
+    staticMap: StaticCell[][],
+): CandidateMoves {
+    const EMPTY = -2;
+    const FILLED = -1;
+    const filled: number[][] = staticMap.map(row => row.map(cell => (cell === StaticCell.Wall ? FILLED : EMPTY)));
+
+    for (const snake of allSnakes) {
+        for (const { x, y } of snake.body) {
+            filled[y][x] = FILLED;
+        }
+    }
+
+    const candidateMoves: CandidateMoves = new Map();
+
+    for (const snake of allSnakes) {
+        const { x, y } = snake.body[0];
+        const valid: Direction[] = [];
+
+        for (const dir of DIRECTIONS as Direction[]) {
+            const { x: dx, y: dy } = DELTAS[dir];
+            const nx = x + dx;
+            const ny = y + dy;
+
+            if (filled[ny]?.[nx] !== FILLED) {
+                valid.push(dir);
+            }
+        }
+
+        candidateMoves.set(snake.id, valid);
+    }
+
+    return candidateMoves;
+}
 
 // ── Joint Action ──────────────────────────────────────────────────────────────
 
@@ -366,59 +416,21 @@ type JointActionResult = {
  * Composes all four phases in order.
  * Returns survivors, eaten sources, remaining sources, and all dead snake ids.
  */
-/**
- * Composes all four phases in order.
- * Returns survivors, eaten sources, remaining sources, and all dead snake ids.
- *
- * When called with a single snake, logs the state after each phase.
- */
 function applyJointAction(
     snakes: Snakebot[],
     directions: Map<number, Direction>,
     sources: Point[],
     staticMap: StaticCell[][],
 ): JointActionResult {
-    const logId = snakes.length === 1 ? snakes[0].id : null;
- 
-    const logSnake = (phase: string, snake: Snakebot | undefined) => {
-        if (!snake) return;
-        console.error(`[AJA id=${snake.id}] ${phase}: head=(${snake.body[0].x},${snake.body[0].y}) tail=(${snake.body[snake.body.length - 1].x},${snake.body[snake.body.length - 1].y}) len=${snake.body.length}`);
-    };
- 
-    if (logId !== null) {
-        const s = snakes[0];
-        console.error(`[AJA id=${s.id}] INPUT: dir=${directions.get(s.id)} head=(${s.body[0].x},${s.body[0].y}) len=${s.body.length} sources=[${sources.map(p => `(${p.x},${p.y})`).join(', ')}]`);
-    }
- 
     const afterMove = phaseMove(snakes, directions);
-    if (logId !== null) logSnake('phaseMove', afterMove.find(s => s.id === logId));
- 
     const afterEat = phaseEat(afterMove, sources);
-    if (logId !== null) {
-        logSnake('phaseEat', afterEat.snakes.find(s => s.id === logId));
-        console.error(`[AJA id=${logId}] phaseEat: ate=${afterEat.eatenSources.length > 0} remainingSources=${afterEat.remainingSources.length}`);
-    }
- 
     const afterCollide = phaseCollide(afterEat.snakes, staticMap);
-    if (logId !== null) {
-        const s = afterCollide.survivors.find(s => s.id === logId);
-        if (s) logSnake('phaseCollide', s);
-        else console.error(`[AJA id=${logId}] phaseCollide: DEAD — deadIds=[${[...afterCollide.deadIds]}]`);
-    }
- 
-    const afterGravity = phaseGravity(afterCollide.survivors, afterEat.remainingSources, staticMap);
-    if (logId !== null) {
-        const s = afterGravity.survivors.find(s => s.id === logId);
-        if (s) logSnake('phaseGravity', s);
-        else console.error(`[AJA id=${logId}] phaseGravity: DEAD — deadIds=[${[...afterGravity.deadIds]}]`);
-    }
-
-    afterCollide.deadIds.forEach((v) => afterGravity.deadIds.add(v));
+    const afterGravity = phaseGravity(afterCollide.survivors, afterEat.remainingSources, afterCollide.deadIds, staticMap);
     return {
         survivors:        afterGravity.survivors,
         eatenSources:     afterEat.eatenSources,
         remainingSources: afterEat.remainingSources,
-        deadSnakeIds:     afterGravity.deadIds,
+        deadSnakeIds:     afterCollide.deadIds,
     };
 }
 
@@ -568,8 +580,9 @@ function phaseCollide(
 function phaseGravity(
     snakes: Snakebot[],
     remainingSources: Point[],
+    deadIds: Set<number>,
     staticMap: StaticCell[][],
-): { survivors: Snakebot[]; deadIds: Set<number> } {
+): { survivors: Snakebot[] } {
 
     // Pre-encode sources and static walls into a single flat lookup
     // Using a typed array bitmask (solid=1, source=2) avoids string allocation entirely
@@ -656,7 +669,6 @@ function phaseGravity(
 
     // Materialise results — only one allocation pass at the very end
     const survivors: Snakebot[] = [];
-    const deadIds = new Set<number>();
 
     for (let i = 0; i < n; i++) {
         if (isDead[i]) {
@@ -674,7 +686,7 @@ function phaseGravity(
         }
     }
 
-    return { survivors, deadIds };
+    return { survivors };
 }
 
 
@@ -692,3 +704,8 @@ function inferFacing(body: Point[]): Direction {
     if (dy === 1)  return 'DOWN';
     return 'UP';
 }
+
+const logSnake = (phase: string, snake: Snakebot | undefined) => {
+    if (!snake) return;
+    console.error(`[AJA id=${snake.id}] ${phase}: head=(${snake.body[0].x},${snake.body[0].y}) tail=(${snake.body[snake.body.length - 1].x},${snake.body[snake.body.length - 1].y}) len=${snake.body.length}`);
+};
