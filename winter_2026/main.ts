@@ -117,13 +117,6 @@ function stampSnake(board: Cell[][], snake: Snakebot): void {
     }
 }
 
-function clearSnake(board: Cell[][], snake: Snakebot): void {
-    for (const p of snake.body) {
-        if (p.x < 0 || p.x >= width || p.y < 0 || p.y >= height) continue;
-        board[p.y][p.x] = { content: CellContent.Empty, snakebotId: null };
-    }
-}
-
 function logState(state: GameState): void {
     console.error("BOARD STATE:");
     for (let y = 0; y < height; y++) {
@@ -228,8 +221,34 @@ while (true) {
         const snake = state.mySnakes.get(id);
         if (!snake) continue;
 
+
+
+
+    // ── STEP 1 VERIFICATION ───────────────────────────────────────────────────────
+    // Pick one of your snakes and log the before/after for phaseMove + phaseEat.
+    // Compare against what the game viewer shows.
+
+    if (id == 2) {
+        const testDir: Direction = 'UP'; // change to whatever direction you're sending
+
+        const afterMove = applyJointAction([snake], new Map([[snake.id, testDir]]), state.powerSources, staticMap);
+        console.error("After join action", afterMove);
+    }
+    // ─────────────────────────────────────────────────────────────────────────────
+
+
+
+
+
         commands.push(...algo(state, snake));
     }
+
+
+
+
+
+
+
 
     // ── Dispatch commands ──────────────────────────────────────────────────────
     dispatch(commands, mySnakeIds, activeSnakeIds, width, height);
@@ -248,12 +267,12 @@ function algo(state: GameState, currentSnake: Snakebot): Command[] {
 
     const isWalkable = (p: Point) => isTraversable(p.x, p.y, state.board);
 
-    const [path, fallback] = bestMovesInX(head, closest, isWalkable);
+    const res = aStar(head, closest, isWalkable);
 
-    if (!path) return [];
+    if (!res || res?.length <= 0) return [];
 
-    const dx = path.x - head.x;
-    const dy = path.y - head.y;
+    const dx = res[0].x - head.x;
+    const dy = res[0].y - head.y;
     const direction: Direction =
         dx === 1 ? 'RIGHT' :
             dx === -1 ? 'LEFT' :
@@ -334,89 +353,342 @@ function aStar(
 }
 
 
+// ── Joint Action ──────────────────────────────────────────────────────────────
+
+type JointActionResult = {
+    survivors:       Snakebot[];
+    eatenSources:    Point[];
+    remainingSources: Point[];
+    deadSnakeIds:    Set<number>;
+};
+
 /**
- * Search to a depth, the best two moves. Returns a list, with the best move first, and the second best move second (if it exists).
+ * Composes all four phases in order.
+ * Returns survivors, eaten sources, remaining sources, and all dead snake ids.
  */
-function bestMovesInX(
-    start: Point,
-    goal: Point,
-    isWalkable: (p: Point) => boolean,
-    maxDepth: number = 5,
-): Point[] {
-    type State = { point: Point; firstMove: Point; depth: number };
-    const queue: State[] = [];
-    const visited = new Set<string>();
-    const key = (p: Point) => `${p.x},${p.y}`;
-
-    for (const delta of [{ x: 0, y: -1 }, { x: 0, y: 1 }, { x: -1, y: 0 }, { x: 1, y: 0 }]) {
-        const neighbour = { x: start.x + delta.x, y: start.y + delta.y };
-        if (!isWalkable(neighbour)) continue;
-        queue.push({ point: neighbour, firstMove: neighbour, depth: 1 });
-        visited.add(key(neighbour));
+/**
+ * Composes all four phases in order.
+ * Returns survivors, eaten sources, remaining sources, and all dead snake ids.
+ *
+ * When called with a single snake, logs the state after each phase.
+ */
+function applyJointAction(
+    snakes: Snakebot[],
+    directions: Map<number, Direction>,
+    sources: Point[],
+    staticMap: StaticCell[][],
+): JointActionResult {
+    const logId = snakes.length === 1 ? snakes[0].id : null;
+ 
+    const logSnake = (phase: string, snake: Snakebot | undefined) => {
+        if (!snake) return;
+        console.error(`[AJA id=${snake.id}] ${phase}: head=(${snake.body[0].x},${snake.body[0].y}) tail=(${snake.body[snake.body.length - 1].x},${snake.body[snake.body.length - 1].y}) len=${snake.body.length}`);
+    };
+ 
+    if (logId !== null) {
+        const s = snakes[0];
+        console.error(`[AJA id=${s.id}] INPUT: dir=${directions.get(s.id)} head=(${s.body[0].x},${s.body[0].y}) len=${s.body.length} sources=[${sources.map(p => `(${p.x},${p.y})`).join(', ')}]`);
+    }
+ 
+    const afterMove = phaseMove(snakes, directions);
+    if (logId !== null) logSnake('phaseMove', afterMove.find(s => s.id === logId));
+ 
+    const afterEat = phaseEat(afterMove, sources);
+    if (logId !== null) {
+        logSnake('phaseEat', afterEat.snakes.find(s => s.id === logId));
+        console.error(`[AJA id=${logId}] phaseEat: ate=${afterEat.eatenSources.length > 0} remainingSources=${afterEat.remainingSources.length}`);
+    }
+ 
+    const afterCollide = phaseCollide(afterEat.snakes, staticMap);
+    if (logId !== null) {
+        const s = afterCollide.survivors.find(s => s.id === logId);
+        if (s) logSnake('phaseCollide', s);
+        else console.error(`[AJA id=${logId}] phaseCollide: DEAD — deadIds=[${[...afterCollide.deadIds]}]`);
+    }
+ 
+    const afterGravity = phaseGravity(afterCollide.survivors, afterEat.remainingSources, staticMap);
+    if (logId !== null) {
+        const s = afterGravity.survivors.find(s => s.id === logId);
+        if (s) logSnake('phaseGravity', s);
+        else console.error(`[AJA id=${logId}] phaseGravity: DEAD — deadIds=[${[...afterGravity.deadIds]}]`);
     }
 
-    let best: { firstMove: Point; dist: number } | null = null;
-    let secondBest: { firstMove: Point; dist: number } | null = null;
+    afterCollide.deadIds.forEach((v) => afterGravity.deadIds.add(v));
+    return {
+        survivors:        afterGravity.survivors,
+        eatenSources:     afterEat.eatenSources,
+        remainingSources: afterEat.remainingSources,
+        deadSnakeIds:     afterGravity.deadIds,
+    };
+}
 
-    while (queue.length > 0) {
-        const { point, firstMove, depth } = queue.shift()!;
 
-        const dist = heuristic(point, goal);
 
-        if (!best || dist < best.dist) {
-            // Current best is demoted to second if it has a different firstMove
-            if (best && key(best.firstMove) !== key(firstMove)) {
-                secondBest = best;
+// ── Phase 1: Move ─────────────────────────────────────────────────────────────
+
+/**
+ * Advances every snake's head by one step in its given direction.
+ * The rest of the body shifts forward (each segment takes the position of the one ahead).
+ * The tail is NOT removed — body is temporarily one longer than normal.
+ * No collision or gravity logic here.
+ */
+function phaseMove(
+    snakes: Snakebot[],
+    directions: Map<number, Direction>,
+): Snakebot[] {
+    return snakes.map(snake => {
+        const direction = directions.get(snake.id) ?? inferFacing(snake.body);
+        const delta = DELTAS[direction];
+        const newHead: Point = {
+            x: snake.body[0].x + delta.x,
+            y: snake.body[0].y + delta.y,
+        };
+
+        return {
+            ...snake,
+            body: [newHead, ...snake.body],
+        };
+    });
+}
+
+// ── Phase 2: Eat ──────────────────────────────────────────────────────────────
+
+/**
+ * For each snake, checks if its head is on a power source.
+ *   - Ate:         tail stays → snake is permanently one longer
+ *   - Did not eat: tail removed → snake returns to original length
+ *
+ * Multiple heads on the same source: all eat it.
+ * Eaten sources are removed from the returned remainingSources.
+ */
+function phaseEat(
+    movedSnakes: Snakebot[],
+    sources: Point[],
+): {
+    snakes: Snakebot[];
+    eatenSources: Point[];
+    remainingSources: Point[];
+} {
+    const eatenSources: Point[] = [];
+
+    const snakes = movedSnakes.map(snake => {
+        const head = snake.body[0];
+        const ate = sources.some(s => s.x === head.x && s.y === head.y);
+
+        if (ate) {
+            const alreadyTracked = eatenSources.some(s => s.x === head.x && s.y === head.y);
+            if (!alreadyTracked) {
+                eatenSources.push(head);
             }
-            best = { firstMove, dist };
-        } else if (
-            key(firstMove) !== key(best.firstMove) &&
-            (!secondBest || dist < secondBest.dist)
-        ) {
-            secondBest = { firstMove, dist };
+            return snake; // tail stays, body is already the right length
         }
 
-        if (depth >= maxDepth) continue;
+        return {
+            ...snake,
+            body: snake.body.slice(0, -1), // remove tail
+        };
+    });
 
-        for (const delta of [{ x: 0, y: -1 }, { x: 0, y: 1 }, { x: -1, y: 0 }, { x: 1, y: 0 }]) {
-            const neighbour = { x: point.x + delta.x, y: point.y + delta.y };
-            const nKey = key(neighbour);
-            if (visited.has(nKey) || !isWalkable(neighbour)) continue;
-            visited.add(nKey);
-            queue.push({ point: neighbour, firstMove, depth: depth + 1 });
+    const remainingSources = sources.filter(
+        s => !eatenSources.some(e => e.x === s.x && e.y === s.y)
+    );
+
+    return { snakes, eatenSources, remainingSources };
+}
+
+// ── Phase 3: Collide ──────────────────────────────────────────────────────────
+
+/**
+ * Collide all heads, and shorten tail
+ */
+function phaseCollide(
+    snakes: Snakebot[],
+    staticMap: StaticCell[][],
+): { survivors: Snakebot[]; shortenedIds: Set<number>; deadIds: Set<number> } {
+    const EMPTY = -2;
+    const FILLED = -1;
+    const board: number[][] = staticMap.map(row => row.map(cell => (cell === StaticCell.Wall ? FILLED : EMPTY)));
+
+    const shortenedIdSet = new Set<number>();
+    const deadIdSet = new Set<number>();
+
+    // Stamp all snake bodies (excluding heads) as -2
+    for (const snake of snakes) {
+        for (let i = 1; i < snake.body.length; i++) {
+            const {x, y} = snake.body[i];
+            board[y][x] = FILLED;
         }
     }
 
-    // Bug fix 2: actually return the results
-    const result: Point[] = [];
-    if (best) result.push(best.firstMove);
-    if (secondBest) result.push(secondBest.firstMove);
-    return result;
-}
+    // Stamp heads as their snake id (>= 0)
+    for (const snake of snakes) {
+        const {x, y} = snake.body[0];
+        const cell = board[y][x];
 
-// ── Gravity and Support Checks ─────────────────────────────────────────────────────────
-
-function isSnakeStraightUp(snake: Snakebot): boolean {
-    const head = snake.body[0];
-    return snake.body.every(p => p.x === head.x);
-}
-
-function computeFall(body: Point[]): Point[] | null {
-    let rows = 0;
-
-    while (true) {
-        const supported = body.some(p => {
-            const below = p.y + rows + 1;
-            if (below < 0 || below >= height) return false;
-            return staticMap[below][p.x] === StaticCell.Wall;
-        });
-
-        if (supported) break;
-        rows++;
-
-        // If the entire body is off the bottom of the map with no wall ever found, falls forever
-        if (body.every(p => p.y + rows >= height)) return null;
+        if (cell === EMPTY) {
+            board[y][x] = snake.id;
+        } else if (cell === FILLED) {
+            shortenedIdSet.add(snake.id);
+        } else {
+            shortenedIdSet.add(cell);
+            shortenedIdSet.add(snake.id);
+        }
     }
 
-    return body.map(p => ({ ...p, y: p.y + rows }));
+    // Shorten, then kill any that drop below 3
+    const survivors: Snakebot[] = [];
+    for (const snake of snakes) {
+        if (shortenedIdSet.has(snake.id)) {
+            const shortened = { ...snake, body: snake.body.slice(1) };
+            if (shortened.body.length < 3) {
+                deadIdSet.add(snake.id);
+                continue;
+            }
+            survivors.push(shortened);
+        } else {
+            survivors.push(snake);
+        }
+    }
+
+    return {
+        survivors,
+        shortenedIds: shortenedIdSet,
+        deadIds: deadIdSet,
+    };
+}
+
+// ── Phase 4: Gravity ──────────────────────────────────────────────────────────
+
+/**
+ * All surviving snakes fall simultaneously until supported.
+ * Solid during this phase: static walls + remaining (uneaten) sources + settled snake bodies.
+ * Two snakes falling simultaneously cannot support each other — only already-settled
+ * bodies count as solid. A snake that falls entirely off the bottom is removed.
+ */
+function phaseGravity(
+    snakes: Snakebot[],
+    remainingSources: Point[],
+    staticMap: StaticCell[][],
+): { survivors: Snakebot[]; deadIds: Set<number> } {
+
+    // Pre-encode sources and static walls into a single flat lookup
+    // Using a typed array bitmask (solid=1, source=2) avoids string allocation entirely
+    const solid = new Uint8Array(width * height);
+
+    for (const s of remainingSources) {
+        if (s.x >= 0 && s.x < width && s.y >= 0 && s.y < height)
+            solid[s.y * width + s.x] |= 1;
+    }
+    for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+            if (staticMap[y][x] === StaticCell.Wall)
+                solid[y * width + x] |= 1;
+        }
+    }
+
+    // Track each snake's state with indices to avoid repeated object allocation
+    // settled[i] = true means snake i has landed; dead means it fell off the bottom
+    const n = snakes.length;
+    const yOffset = new Int32Array(n);     // how many rows each snake has fallen
+    const isSettled = new Uint8Array(n);
+    const isDead    = new Uint8Array(n);
+
+    let unsettledCount = n;
+
+    // Incrementally maintained cell set for settled snakes only
+    // Written directly into `solid` to avoid a second lookup structure
+    const markSettled = (idx: number) => {
+        isSettled[idx] = 1;
+        unsettledCount--;
+        const snake = snakes[idx];
+        const dy = yOffset[idx];
+        for (const p of snake.body) {
+            const ny = p.y + dy;
+            const nx = p.x;
+            if (nx >= 0 && nx < width && ny >= 0 && ny < height)
+                solid[ny * width + nx] |= 1;
+        }
+    };
+
+    const isSupported = (idx: number): boolean => {
+        const snake = snakes[idx];
+        const dy = yOffset[idx];
+        for (const p of snake.body) {
+            const nx = p.x;
+            const below = p.y + dy + 1;
+            if (nx < 0 || nx >= width) continue;
+            if (below >= height) return true;  // resting on the floor
+            if (solid[below * width + nx]) return true;
+        }
+        return false;
+    };
+
+    while (unsettledCount > 0) {
+        // Settle phase: drain all snakes now supported (chain reactions included)
+        let anySettled = true;
+        while (anySettled) {
+            anySettled = false;
+            for (let i = 0; i < n; i++) {
+                if (isSettled[i] || isDead[i]) continue;
+                if (isSupported(i)) {
+                    markSettled(i);
+                    anySettled = true;
+                }
+            }
+        }
+
+        if (unsettledCount === 0) break;
+
+        // Drop phase: shift all still-falling snakes down one row
+        for (let i = 0; i < n; i++) {
+            if (isSettled[i] || isDead[i]) continue;
+            yOffset[i]++;
+
+            // If every segment is now off the bottom, kill the snake
+            const snake = snakes[i];
+            const dy = yOffset[i];
+            if (snake.body.every(p => p.y + dy >= height)) {
+                isDead[i] = 1;
+                unsettledCount--;
+            }
+        }
+    }
+
+    // Materialise results — only one allocation pass at the very end
+    const survivors: Snakebot[] = [];
+    const deadIds = new Set<number>();
+
+    for (let i = 0; i < n; i++) {
+        if (isDead[i]) {
+            deadIds.add(snakes[i].id);
+        } else {
+            const dy = yOffset[i];
+            survivors.push(
+                dy === 0
+                    ? snakes[i]   // no copy needed if snake never moved
+                    : {
+                        ...snakes[i],
+                        body: snakes[i].body.map(p => ({ ...p, y: p.y + dy })),
+                    }
+            );
+        }
+    }
+
+    return { survivors, deadIds };
+}
+
+
+// --------------------------------------------------------------------
+// HELPERS
+
+
+// When parsing a snake, infer facing from head → previous head (body[0] → body[1])
+function inferFacing(body: Point[]): Direction {
+    if (body.length < 2) return 'UP'; // default for length-1 snake
+    const dx = body[0].x - body[1].x;
+    const dy = body[0].y - body[1].y;
+    if (dx === 1)  return 'RIGHT';
+    if (dx === -1) return 'LEFT';
+    if (dy === 1)  return 'DOWN';
+    return 'UP';
 }
