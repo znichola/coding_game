@@ -30,8 +30,8 @@ At least one action per turn, separated by `;`:
 - `planTurn(budget)`: picks the cheapest unconnected desired pair (sticky `target`), places path cells that fit the budget, continues to the next route if paint remains.
 
 ## Assumptions still unverified
-- POI cost 1, town cells already have tracks, inked cells impassable, foe tracks blocking.
-- Regions/instability not modelled.
+- Town cells assumed to already hold tracks (or be free).
+- Regions/instability not modelled (unused this league).
 
 ## Official docs (this league, pasted by user)
 Init: `myId`; `width`; `height`; `height*width` lines `regionId type` (type 0-2); `townCount`; then `townId townX townY desiredConnections` (comma list, or `x` if none).
@@ -41,7 +41,10 @@ Turn: `myScore`, `foeScore`, then per cell `trackOwner instability inked partOfA
 Output: one line, at least one action and AT MOST ONE `AUTOPLACE`. Actions: `PLACE_TRACKS x y`, `AUTOPLACE fx fy tx ty`, `MESSAGE text`, `WAIT`. No DISRUPT this league.
 Constraints: 50 ms per turn (1000 ms first turn); 21<=width<=30; 14<=height<=20; 4<=townCount<=12.
 
+## Confirmed by user
+- Owned, enemy and neutral tracks are equivalent for scoring and movement: all cost 0 and are passable.
+- If both players place on the same cell on the same turn it becomes neutral and nobody scores it, so `planTurn` shuffles which cells it places.
+
 ## Open questions
-- Do neutral tracks (owner 2) count toward my connections? Code treats them as free and passable.
 - Town cells: assumed to already hold tracks (or be free).
 - partOfActiveConnections is "not useful" this league, but the code uses it to detect connected pairs; verify it still gets populated.

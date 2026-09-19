@@ -161,7 +161,6 @@ const cmd = new Commands();
 
 const TERRAIN_COST = [1, 2, 3, 1]; // plains, river, mountain, POI (POI cost is an assumption)
 const PAINT_PER_TURN = 3;
-const NEUTRAL = 2; // neutral track: assumed usable for free (unverified)
 
 const trackOwner: number[] = new Array(width * height).fill(-1); // -1 none, 0/1 player, 2 neutral
 const isInked: boolean[] = new Array(width * height).fill(false);
@@ -188,12 +187,11 @@ const pairs: [Town, Town][] = [];
 
 let target: string | null = null; // route we are committed to across turns
 
-/** Paint cost of a cell this turn. `mine` = cells I own or plan to place this turn. */
+/** Paint cost of a cell this turn. `mine` = cells I plan to place this turn. Owned, foe and neutral tracks all behave the same. */
 function makeCost(mine: Set<number>): CostFn {
     return (x, y) => {
         const i = y * width + x;
-        if (townCells.has(i) || mine.has(i) || trackOwner[i] === myId || trackOwner[i] === NEUTRAL) return 0;
-        if (trackOwner[i] >= 0) return Infinity; // opponent's track
+        if (townCells.has(i) || mine.has(i) || trackOwner[i] >= 0) return 0; // any track (mine, foe's, neutral) is free to use
         return TERRAIN_COST[terrain[i]] ?? 1;
     };
 }
@@ -221,28 +219,33 @@ function pickRoute(done: Set<string>, mine: Set<number>, cost: CostFn) {
 
 /** Queue PLACE_TRACKS so that as many paint points as possible go into finishing routes. */
 function planTurn(budget: number) {
-    const done = new Set(connected);
+    const skip = new Set(connected); // already connected, or already worked on this turn
     const mine = new Set<number>();
+    let nextTarget: string | null = null;
     for (let guard = 0; guard <= pairs.length && budget > 0; guard++) {
         const cost = makeCost(mine);
-        const r = pickRoute(done, mine, cost);
+        const r = pickRoute(skip, mine, cost);
         if (!r) break;
+        skip.add(r.key);
+        // Random order: if the foe lays the same cell on the same turn it goes neutral, so avoid predictability.
+        const need = r.path.filter(([x, y]) => cost(x, y) > 0);
+        for (let i = need.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [need[i], need[j]] = [need[j], need[i]];
+        }
         let complete = true;
-        let placed = 0;
-        for (const [x, y] of r.path) { // path order first, then leftovers that still fit
+        for (const [x, y] of need) {
             const c = cost(x, y);
-            if (c === 0) continue;
             if (c <= budget) {
                 cmd.place(x, y);
                 mine.add(y * width + x);
                 budget -= c;
-                placed++;
             } else complete = false;
         }
-        if (complete) { done.add(r.key); target = null; }
-        else { target = r.key; break; } // out of budget for this route
-        if (placed === 0 && !complete) break;
+        // stay committed to the first route we could not finish; leftover paint spills onto the next route
+        if (!complete && nextTarget === null) nextTarget = r.key;
     }
+    target = nextTarget;
 }
 
 // game loop
