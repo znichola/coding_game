@@ -48,3 +48,15 @@ Constraints: 50 ms per turn (1000 ms first turn); 21<=width<=30; 14<=height<=20;
 ## Open questions
 - Town cells: assumed to already hold tracks (or be free).
 - partOfActiveConnections is "not useful" this league, but the code uses it to detect connected pairs; verify it still gets populated.
+
+## Disruption / inking (advanced league rules, pasted by user)
+- 1 disruption point per turn (not retained). `DISRUPT regionId` (or `DISRUPT x y`) adds 1 instability to a region.
+- Instability reaches 4 -> region inked out: tracks washed away, no future placement, active connections through it severed.
+- Cannot disrupt an already inked region, nor a region containing a town.
+- Actions: `PLACE_TRACKS x y`, `AUTOPLACE ...`, `DISRUPT regionId|x y`, `WAIT`. `instability`/`inked` inputs are now meaningful.
+
+## Implementation (main.ts)
+- `search()` is one A*/Dijkstra core (packed-number heap, N,E,S,W tie-break); `astar()` wraps it. `computeRoutes()` runs one full search per town (not per pair) because the 50 ms limit was exceeded (176 ms) with one A* per pair.
+- `planTurn` returns `{mine, routes}`; `planDisrupt` reuses them. It scores non-town, non-inked regions from the cheapest route of every desired pair: +1 foe tracks, -1 my tracks, +0.3 unbuilt cells, -0.6 unbuilt cells of my target route; divided by hits still missing to reach 4; sticky `disruptTarget`; ties go to the most unstable region; always issues a DISRUPT if any region is eligible.
+- Simulated (30x20, 12 towns, all pairs wanted): worst turn ~21 ms (first, JIT), later turns ~1 ms.
+- Not modelled: penalty for placing in a region near 4 instability (foe can ink it), foe knowledge of where foe's towns/start are.

@@ -5,6 +5,7 @@
 const myId: number = parseInt(readline()); // 0 or 1
 const width: number = parseInt(readline()); // map size
 const height: number = parseInt(readline());
+const regionOf: number[] = new Array(width * height).fill(0);
 const terrain: number[] = new Array(width * height).fill(0); // 0 (PLAINS), 1 (RIVER), 2 (MOUNTAIN), 3 (POI)
 for (let i = 0; i < height; i++) {
     for (let j = 0; j < width; j++) {
@@ -12,6 +13,7 @@ for (let i = 0; i < height; i++) {
         const regionId: number = parseInt(inputs[0]);
         const type: number = parseInt(inputs[1]);
         terrain[i * width + j] = type;
+        regionOf[i * width + j] = regionId;
     }
 }
 const townCount: number = parseInt(readline());
@@ -35,71 +37,66 @@ const DIRS: ReadonlyArray<readonly [number, number]> = [[0, -1], [1, 0], [0, 1],
 /** Cost of entering cell (x, y). Return Infinity for impassable cells. */
 type CostFn = (x: number, y: number) => number;
 
+// Heap entries are packed into one number: (f, then higher g, then insertion order) -> smaller key pops first.
+// Costs are integers, so this is exact. Buffers are shared because nothing here is re-entrant.
+const HEAP_CAP = 4 * width * height + 8;
+const heapKey = new Float64Array(HEAP_CAP);
+const heapNode = new Int32Array(HEAP_CAP);
+
 /**
- * Grid A* (4-neighbour). Returns the path from start to goal inclusive as [x, y] pairs,
- * or null if unreachable.
- * Equal-f ties: deeper node (higher g) first, then earliest inserted. Neighbours are
- * inserted N, E, S, W, so north wins, then east, south, west.
+ * Cheapest-cost search from (sx, sy) over a 4-neighbour grid, A* when a goal is given, Dijkstra when gx < 0.
+ * Equal-f ties: deeper node (higher g) first, then earliest inserted. Neighbours are inserted N, E, S, W,
+ * so north wins, then east, south, west.
  * minCost must be <= the smallest finite value cost() can return (keeps the heuristic admissible).
  */
-function astar(
+function search(
     sx: number, sy: number, gx: number, gy: number,
     cost: CostFn, minCost: number = 1,
-): [number, number][] | null {
+): { g: Float64Array; parent: Int32Array } {
     const n = width * height;
-    const start = sy * width + sx;
-    const goal = gy * width + gx;
+    const goal = gx < 0 ? -1 : gy * width + gx;
     const g = new Float64Array(n).fill(Infinity);
     const parent = new Int32Array(n).fill(-1);
     const closed = new Uint8Array(n);
-    const h = (x: number, y: number) => (Math.abs(x - gx) + Math.abs(y - gy)) * minCost;
+    const h = goal < 0 ? () => 0 : (x: number, y: number) => (Math.abs(x - gx) + Math.abs(y - gy)) * minCost;
 
-    // binary min-heap on (f, -g, seq)
-    const hn: number[] = [], hf: number[] = [], hg: number[] = [], hs: number[] = [];
-    let seq = 0;
-    const less = (a: number, b: number) =>
-        hf[a] !== hf[b] ? hf[a] < hf[b] : hg[a] !== hg[b] ? hg[a] > hg[b] : hs[a] < hs[b];
-    const swap = (a: number, b: number) => {
-        [hn[a], hn[b]] = [hn[b], hn[a]]; [hf[a], hf[b]] = [hf[b], hf[a]];
-        [hg[a], hg[b]] = [hg[b], hg[a]]; [hs[a], hs[b]] = [hs[b], hs[a]];
-    };
+    let size = 0, seq = 0;
     const push = (node: number, gv: number, f: number) => {
-        hn.push(node); hf.push(f); hg.push(gv); hs.push(seq++);
-        let i = hn.length - 1;
+        const key = (f * 16384 + (16383 - gv)) * 131072 + seq++;
+        let i = size++;
         while (i > 0) {
             const p = (i - 1) >> 1;
-            if (!less(i, p)) break;
-            swap(i, p); i = p;
+            if (heapKey[p] <= key) break;
+            heapKey[i] = heapKey[p]; heapNode[i] = heapNode[p]; i = p;
         }
+        heapKey[i] = key; heapNode[i] = node;
     };
     const pop = (): number => {
-        const top = hn[0];
-        const last = hn.length - 1;
-        swap(0, last);
-        hn.pop(); hf.pop(); hg.pop(); hs.pop();
-        let i = 0;
-        for (;;) {
-            const l = 2 * i + 1, r = l + 1;
-            let m = i;
-            if (l < last && less(l, m)) m = l;
-            if (r < last && less(r, m)) m = r;
-            if (m === i) break;
-            swap(i, m); i = m;
+        const top = heapNode[0];
+        size--;
+        if (size > 0) {
+            const key = heapKey[size], node = heapNode[size];
+            let i = 0;
+            for (;;) {
+                let c = 2 * i + 1;
+                if (c >= size) break;
+                if (c + 1 < size && heapKey[c + 1] < heapKey[c]) c++;
+                if (heapKey[c] >= key) break;
+                heapKey[i] = heapKey[c]; heapNode[i] = heapNode[c]; i = c;
+            }
+            heapKey[i] = key; heapNode[i] = node;
         }
         return top;
     };
 
+    const start = sy * width + sx;
     g[start] = 0;
     push(start, 0, h(sx, sy));
-    while (hn.length) {
+    while (size > 0) {
         const cur = pop();
         if (closed[cur]) continue; // stale entry
         closed[cur] = 1;
-        if (cur === goal) {
-            const path: [number, number][] = [];
-            for (let c = cur; c !== -1; c = parent[c]) path.push([c % width, (c / width) | 0]);
-            return path.reverse();
-        }
+        if (cur === goal) break;
         const cx = cur % width, cy = (cur / width) | 0;
         for (const [dx, dy] of DIRS) {
             const nx = cx + dx, ny = cy + dy;
@@ -116,7 +113,23 @@ function astar(
             }
         }
     }
-    return null;
+    return { g, parent };
+}
+
+/** Path from the search origin to cell index `to` inclusive as [x, y] pairs, or null if unreached. */
+function pathTo(res: { g: Float64Array; parent: Int32Array }, to: number): [number, number][] | null {
+    if (res.g[to] === Infinity) return null;
+    const path: [number, number][] = [];
+    for (let c = to; c !== -1; c = res.parent[c]) path.push([c % width, (c / width) | 0]);
+    return path.reverse();
+}
+
+/** A* from start to goal inclusive, or null if unreachable. */
+function astar(
+    sx: number, sy: number, gx: number, gy: number,
+    cost: CostFn, minCost: number = 1,
+): [number, number][] | null {
+    return pathTo(search(sx, sy, gx, gy, cost, minCost), gy * width + gx);
 }
 
 // ---------------------------------------------------------------- Command wrapper
@@ -144,6 +157,10 @@ class Commands {
         if (t) this.actions.push(`MESSAGE ${t}`);
         return this;
     }
+    disrupt(regionId: number) {
+        if (Number.isInteger(regionId) && regionId >= 0) this.actions.push(`DISRUPT ${regionId}`);
+        return this;
+    }
     wait() { this.actions.push('WAIT'); return this; }
 
     /** Print the turn's line and reset. Drops WAIT when other actions exist. */
@@ -163,7 +180,9 @@ const TERRAIN_COST = [1, 2, 3, 1]; // plains, river, mountain, POI (POI cost is 
 const PAINT_PER_TURN = 3;
 
 const trackOwner: number[] = new Array(width * height).fill(-1); // -1 none, 0/1 player, 2 neutral
-const isInked: boolean[] = new Array(width * height).fill(false);
+const isInked: boolean[] = new Array(width * height).fill(false); // region inked out: tracks gone, no placing
+const instability: number[] = new Array(width * height).fill(0); // per cell, shared by its region
+let hasTracks = false;
 const connected = new Set<string>();
 const townCells = new Set<number>();
 for (const t of towns.values()) townCells.add(t.y * width + t.x);
@@ -191,40 +210,48 @@ let target: string | null = null; // route we are committed to across turns
 function makeCost(mine: Set<number>): CostFn {
     return (x, y) => {
         const i = y * width + x;
+        if (isInked[i]) return Infinity;
         if (townCells.has(i) || mine.has(i) || trackOwner[i] >= 0) return 0; // any track (mine, foe's, neutral) is free to use
         return TERRAIN_COST[terrain[i]] ?? 1;
     };
 }
 
+interface Route { key: string; path: [number, number][]; total: number }
+
+/** Cheapest route for every desired pair: one full search per town instead of one per pair. */
+function computeRoutes(cost: CostFn): Route[] {
+    const searched = new Map<number, ReturnType<typeof search>>();
+    const routes: Route[] = [];
+    for (const [a, b] of pairs) {
+        let res = searched.get(a.id);
+        if (!res) searched.set(a.id, res = search(a.x, a.y, -1, -1, cost));
+        const path = pathTo(res, b.y * width + b.x);
+        if (path) routes.push({ key: pairKey(a.id, b.id), path, total: res.g[b.y * width + b.x] });
+    }
+    return routes;
+}
+
 /** Choose the route to work on: keep the committed one, else the cheapest remaining. */
-function pickRoute(done: Set<string>, mine: Set<number>, cost: CostFn) {
-    const route = ([a, b]: [Town, Town]) => {
-        const path = astar(a.x, a.y, b.x, b.y, cost, mine.size || trackOwner.includes(myId) ? 0 : 1);
-        if (!path) return null;
-        return { key: pairKey(a.id, b.id), path, total: path.reduce((s, [x, y]) => s + cost(x, y), 0) };
-    };
-    let best: ReturnType<typeof route> = null;
-    for (const p of pairs) {
-        const k = pairKey(p[0].id, p[1].id);
-        if (done.has(k)) continue;
-        if (k === target) {
-            const r = route(p);
-            if (r) return r;
-        }
-        const r = route(p);
-        if (r && (!best || r.total < best.total)) best = r;
+function pickRoute(skip: Set<string>, routes: Route[]): Route | null {
+    let best: Route | null = null;
+    for (const r of routes) {
+        if (skip.has(r.key)) continue;
+        if (r.key === target) return r;
+        if (!best || r.total < best.total) best = r;
     }
     return best;
 }
 
 /** Queue PLACE_TRACKS so that as many paint points as possible go into finishing routes. */
-function planTurn(budget: number) {
+function planTurn(budget: number): { mine: Set<number>; routes: Route[] } {
     const skip = new Set(connected); // already connected, or already worked on this turn
     const mine = new Set<number>();
+    let routes = computeRoutes(makeCost(mine));
+    for (const r of routes) if (r.total === 0) skip.add(r.key); // a free path already exists
     let nextTarget: string | null = null;
     for (let guard = 0; guard <= pairs.length && budget > 0; guard++) {
         const cost = makeCost(mine);
-        const r = pickRoute(skip, mine, cost);
+        const r = pickRoute(skip, routes);
         if (!r) break;
         skip.add(r.key);
         // Random order: if the foe lays the same cell on the same turn it goes neutral, so avoid predictability.
@@ -234,6 +261,7 @@ function planTurn(budget: number) {
             [need[i], need[j]] = [need[j], need[i]];
         }
         let complete = true;
+        const before = mine.size;
         for (const [x, y] of need) {
             const c = cost(x, y);
             if (c <= budget) {
@@ -244,8 +272,64 @@ function planTurn(budget: number) {
         }
         // stay committed to the first route we could not finish; leftover paint spills onto the next route
         if (!complete && nextTarget === null) nextTarget = r.key;
+        if (mine.size !== before) { // costs changed: refresh routes and drop any that became free
+            routes = computeRoutes(makeCost(mine));
+            for (const rt of routes) if (rt.total === 0) skip.add(rt.key);
+        }
     }
     target = nextTarget;
+    return { mine, routes };
+}
+
+// ---------------------------------------------------------------- Disruption (inking)
+
+const INK_AT = 4; // instability at which a region is inked out
+const FOE_W = 1;      // foe-owned track on a route: inking it hurts the foe
+const MINE_W = 1;     // my track on a route: inking it hurts me
+const POT_W = 0.3;    // unbuilt cell on a likely route: potential for either player
+const PLAN_W = 0.6;   // unbuilt cell on the route I am building: I need it
+const STICKY = 0.6;   // keep the current target unless another is this much better
+
+const regionHasTown = new Set<number>();
+for (const i of townCells) regionHasTown.add(regionOf[i]);
+const regionCell = new Map<number, number>(); // any cell of the region, to read its state
+for (let i = 0; i < regionOf.length; i++) if (!regionCell.has(regionOf[i])) regionCell.set(regionOf[i], i);
+
+let disruptTarget: number | null = null; // region we keep pushing towards INK_AT
+
+/**
+ * Score each region by how much inking it costs the foe relative to me, using the cheapest route of every
+ * desired town pair as a stand-in for where points come from, then queue one DISRUPT.
+ * Inking needs INK_AT hits, so the score is divided by the hits still missing and we stay on a target.
+ */
+function planDisrupt(mine: Set<number>, routes: Route[]) {
+    const score = new Map<number, number>();
+    const add = (r: number, v: number) => score.set(r, (score.get(r) ?? 0) + v);
+    for (const { key, path } of routes) {
+        const mineRoute = key === target;
+        for (const [x, y] of path) {
+            const i = y * width + x;
+            const r = regionOf[i];
+            if (mine.has(i) || trackOwner[i] === myId) add(r, -MINE_W);
+            else if (trackOwner[i] === 1 - myId) add(r, FOE_W);
+            else if (trackOwner[i] < 0) add(r, mineRoute ? -PLAN_W : POT_W); // neutral (2) counts for nobody
+        }
+    }
+
+    let best = -1, bestVal = -Infinity;
+    const value = (r: number) => (score.get(r) ?? 0) / (INK_AT - instability[regionCell.get(r)!]);
+    for (const [r, i] of regionCell) {
+        if (regionHasTown.has(r) || isInked[i]) continue;
+        const v = value(r);
+        // ties (e.g. all zero) go to the region closest to inking
+        if (v > bestVal || (v === bestVal && instability[i] > instability[regionCell.get(best)!])) { best = r; bestVal = v; }
+    }
+    if (best < 0) return;
+
+    const t = disruptTarget;
+    if (t !== null && !regionHasTown.has(t) && !isInked[regionCell.get(t)!] && value(t) >= bestVal - (1 - STICKY) * Math.abs(bestVal)) best = t;
+    disruptTarget = best;
+    cmd.disrupt(best);
 }
 
 // game loop
@@ -253,15 +337,18 @@ while (true) {
     const myScore: number = parseInt(readline());
     const foeScore: number = parseInt(readline());
     connected.clear();
+    hasTracks = false;
     for (let i = 0; i < height; i++) {
         for (let j = 0; j < width; j++) {
             var inputs: string[] = readline().split(' ');
             const tracksOwner: number = parseInt(inputs[0]);
-            const instability: number = parseInt(inputs[1]); // region inked (destroyed) when this >= 3.
+            const inst: number = parseInt(inputs[1]); // region inked (destroyed) when this >= 3.
             const inked: boolean = inputs[2] !== '0'; // true if region is destroyed.
             const partOfActiveConnections: string = inputs[3]; // if this cell is part of one or more railway connections, this will be town ids (separated by -) in a list separated by commas. e.g. 0-1,1-2,1-3. "x" otherwise.
             const idx = i * width + j;
             trackOwner[idx] = tracksOwner;
+            if (tracksOwner >= 0) hasTracks = true;
+            instability[idx] = inst;
             isInked[idx] = inked;
             if (partOfActiveConnections !== 'x') {
                 for (const c of partOfActiveConnections.split(',')) {
@@ -271,7 +358,8 @@ while (true) {
             }
         }
     }
-    planTurn(PAINT_PER_TURN);
+    const plan = planTurn(PAINT_PER_TURN);
+    planDisrupt(plan.mine, plan.routes);
 
     // Write an action using console.log()
     // To debug: console.error('Debug messages...');
