@@ -93,3 +93,13 @@ Constraints: 50 ms per turn (1000 ms first turn); 21<=width<=30; 14<=height<=20;
 - Levels 0/1/2 (SOFT_MS 16, HARD_MS 26, SLOW_MS 30): every stage checks the clock, a slow turn raises the level next turn, 5 calm turns lower it. When active, a `MESSAGE time guard lvl N Xms` is added to the output. Tested with tiny budgets: still valid output, 2-5 ms/turn, and level 2 alone still matched/beat the old bot in my sim.
 - planDisrupt now prefers regions holding foe tracks (FOE_SUNK_W bonus) and, when any exist, never picks an empty region.
 - Real-judge CPU speed is unknown; if it still times out, lower SOFT_MS/HARD_MS or start at level 1.
+
+## Debug logging and tools
+- `LOG = true` at the top of main.ts dumps everything to STDERR (stdout is commands only): `#IN` init lines, then per turn `#T` (scores, predicted points/turn, my id), `#OWN` (track string, `.`=none), `#INST`, `#INKED`, `#ACT` (game's active-connection cells), `#DBG` (level, ms, candidate counts, chosen cells and disrupt), `#OUT` (the command line). Set it back to false before submitting.
+- `tools/` (not submitted): `referee.mjs` (exact-rules simulator; `node tools/referee.mjs botA.ts botB.ts nGames`, env REG_DIV, G0, DBG, TL, INKLOG, BOTLOG=prefix writes bot logs), `baseline.ts` (previous bot), `analyze.mjs <log>` (checks my scoring model against real score changes and the game's ACT data, prints a per-turn timeline), `replay.mjs <log> <bot.ts> [from] [to]` (re-runs a bot on recorded positions). `worker.mjs`/`loglib.mjs` are helpers. Requires Node 22+ (runs .ts directly).
+
+## First real log (analysed) and fixes
+- Real game (me id 0, 8 towns, 26x17): the scoring model matched every score change I checked (pred vs actual deltas). Game ended at turn 61 with me 1471 vs foe 1082 (all connections impossible, I was ahead).
+- The foe pumped one region from turn 1 (4 hits in a row) and inked my early route there at turn 6, so I scored 0 that turn. Fix: `trackFoeHits` detects regions whose instability rose without my hit; after FOE_STREAK_DOOM (2) consecutive foe hits the region is treated as impassable (`doomed`) for route planning.
+- Turn 2 took 71 ms (cold JIT). Fix: `warmUp` replays the first turn's planning for up to ~300 ms (the first turn allows 1000 ms) and discards results.
+- tools/loglib.mjs now also reads the raw HTML dump from the CodinGame console; save the page fragment to a file and run `node tools/analyze.mjs file`.

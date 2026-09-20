@@ -2,25 +2,33 @@
  * Connect towns with your train tracks and disrupt the opponent's.
  **/
 
-const myId: number = parseInt(readline()); // 0 or 1
-const width: number = parseInt(readline()); // map size
-const height: number = parseInt(readline());
+// Debug log: set true to dump every input and decision to STDERR (tags #IN #T #OWN #INST #INKED #ACT #DBG #OUT).
+// stdout is reserved for commands; printing anything else there would be an invalid action and lose the game.
+const LOG = false;
+const logLine = (tag: string, text: string) => { if (LOG) console.error(`#${tag} ${text}`); };
+let initDone = false;
+const input = (): string => { const l = readline(); if (LOG && !initDone) console.error('#IN ' + l); return l; };
+let dbgInfo = '';
+
+const myId: number = parseInt(input()); // 0 or 1
+const width: number = parseInt(input()); // map size
+const height: number = parseInt(input());
 const regionOf: number[] = new Array(width * height).fill(0);
 const terrain: number[] = new Array(width * height).fill(0); // 0 (PLAINS), 1 (RIVER), 2 (MOUNTAIN), 3 (POI)
 for (let i = 0; i < height; i++) {
     for (let j = 0; j < width; j++) {
-        var inputs: string[] = readline().split(' ');
+        var inputs: string[] = input().split(' ');
         const regionId: number = parseInt(inputs[0]);
         const type: number = parseInt(inputs[1]);
         terrain[i * width + j] = type;
         regionOf[i * width + j] = regionId;
     }
 }
-const townCount: number = parseInt(readline());
+const townCount: number = parseInt(input());
 interface Town { id: number; x: number; y: number; wants: number[] }
 const towns = new Map<number, Town>();
 for (let i = 0; i < townCount; i++) {
-    var inputs: string[] = readline().split(' ');
+    var inputs: string[] = input().split(' ');
     const townId: number = parseInt(inputs[0]);
     const townX: number = parseInt(inputs[1]);
     const townY: number = parseInt(inputs[2]);
@@ -28,6 +36,7 @@ for (let i = 0; i < townCount; i++) {
     const wants = (desiredConnections ?? '').split(',').map(Number).filter(n => Number.isInteger(n));
     towns.set(townId, { id: townId, x: townX, y: townY, wants });
 }
+initDone = true;
 
 // ---------------------------------------------------------------- A*
 
@@ -162,11 +171,14 @@ class Commands {
         return this;
     }
     wait() { this.actions.push('WAIT'); return this; }
+    mark() { return this.actions.length; }
+    rollback(n: number) { this.actions.length = n; }
 
     /** Print the turn's line and reset. Drops WAIT when other actions exist. */
     flush() {
         let out = this.actions.filter(a => a !== 'WAIT');
         if (out.length === 0) out = ['WAIT'];
+        logLine('OUT', out.join(';'));
         console.log(out.join(';'));
         this.actions = [];
         this.placed.clear();
@@ -283,7 +295,7 @@ interface Cand { cells: number[]; paint: number; ratio: number }
 function candidatePaths(owner: Int8Array, p: number, variant: number): number[][] {
     const cost: CostFn = (x, y) => {
         const i = y * width + x;
-        if (isInked[i]) return Infinity;
+        if (isInked[i] || doomed[i]) return Infinity; // inked, or the foe is about to ink it
         if (isTown[i]) return variant === 2 ? 6 : 0;
         const o = owner[i];
         if (o >= 0) {
@@ -447,6 +459,10 @@ function planPlacements(t0: number) {
         const total = (n > 0 ? 0.5 * worst + 0.5 * (sum / n) : 0) + PROGRESS_W * H * m.progress;
         if (total > bestVal) { bestVal = total; best = m; }
     }
+    if (LOG) {
+        const top = (cs: Cand[]) => cs.slice(0, 3).map(c => `${c.cells.length}c/${c.paint}p/r${c.ratio.toFixed(1)}`).join(' ');
+        dbgInfo += `myC=${myC.length}[${top(myC)}] foeC=${foeC.length}[${top(foeC)}] place=${best.cells.map(c => (c % width) + ',' + ((c / width) | 0)).join(' ')} `;
+    }
     const placed = new Set(best.cells);
     lastTarget = new Set(best.primary.cells.filter(c => !placed.has(c)));
     return { cells: best.cells, myC, foeC };
@@ -469,6 +485,25 @@ for (let i = 0; i < N; i++) {
 }
 
 let disruptTarget: number | null = null; // region we keep pushing towards INK_AT
+let lastHit = -1;                        // region I disrupted last turn (to tell my hits from the foe's)
+const prevInst = new Map<number, number>();
+const foeStreak = new Map<number, number>(); // consecutive turns the foe has hit a region
+const FOE_STREAK_DOOM = 2;                  // this many foe hits in a row: assume they will finish it
+const doomed = new Uint8Array(N);           // per cell: its region is being inked by the foe
+
+/** Called once per turn after parsing: works out which regions the foe is pumping (instability rose and it was not me). */
+function trackFoeHits() {
+    for (const [r, cells] of regionCells) {
+        const v = instability[cells[0]];
+        const rise = v - (prevInst.get(r) ?? 0);
+        const foeHits = rise - (r === lastHit ? 1 : 0);
+        // cumulative, not consecutive: instability never decays, and the foe skips a turn now and then (real log: 0,3,4,5)
+        if (foeHits > 0) foeStreak.set(r, (foeStreak.get(r) ?? 0) + foeHits);
+        prevInst.set(r, v);
+        const dead = (foeStreak.get(r) ?? 0) >= FOE_STREAK_DOOM && v < INK_AT;
+        for (const c of cells) doomed[c] = dead ? 1 : 0;
+    }
+}
 
 /**
  * One DISRUPT per turn. A region's value is how much inking it improves (my points/turn - foe's), measured by
@@ -524,18 +559,40 @@ function planDisrupt(after: Int8Array, myC: Cand[], foeC: Cand[], t0: number) {
     const tv = t === null || (foeRegions.size > 0 && !foeRegions.has(t)) ? undefined : values.get(t);
     if (tv !== undefined && tv >= bestVal - (1 - STICKY) * Math.abs(bestVal)) best = t!;
     disruptTarget = best;
+    if (LOG) dbgInfo += `disrupt=${best} v=${(values.get(best) ?? 0).toFixed(1)} foeRegions=${foeRegions.size} `;
+    lastHit = best;
     cmd.disrupt(best);
+}
+
+/**
+ * The first turn may take 1000 ms but later ones only 50 ms, and cold code is several times slower.
+ * Replay this turn's planning a number of times, discarding the results, so the JIT has compiled the hot paths.
+ */
+function warmUp(t0: number) {
+    const saved = { lastTarget, disruptTarget, lastHit, level };
+    const mark = cmd.mark();
+    const start = Date.now();
+    for (let i = 0; i < 60 && Date.now() - start < 300 && Date.now() - t0 < 450; i++) {
+        const t = Date.now();
+        const plan = planPlacements(t);
+        planDisrupt(applyMoves(trackOwner, plan.cells, myId, [], 1 - myId), plan.myC, plan.foeC, t);
+        cmd.rollback(mark);
+    }
+    lastTarget = saved.lastTarget; disruptTarget = saved.disruptTarget; lastHit = saved.lastHit; level = saved.level;
+    guardHit = false;
+    dbgInfo = '';
 }
 
 // game loop
 while (true) {
-    const myScore: number = parseInt(readline());
-    const foeScore: number = parseInt(readline());
+    const myScore: number = parseInt(input());
+    const foeScore: number = parseInt(input());
     const t0 = Date.now();
     turnNo++;
+    const actLog: string[] = [];
     for (let i = 0; i < height; i++) {
         for (let j = 0; j < width; j++) {
-            var inputs: string[] = readline().split(' ');
+            var inputs: string[] = input().split(' ');
             const tracksOwner: number = parseInt(inputs[0]);
             const inst: number = parseInt(inputs[1]); // region inked (destroyed) when this >= 3.
             const inked: boolean = inputs[2] !== '0'; // true if region is destroyed.
@@ -544,18 +601,44 @@ while (true) {
             trackOwner[idx] = tracksOwner;
             instability[idx] = inst;
             isInked[idx] = inked ? 1 : 0;
+            if (LOG && partOfActiveConnections !== 'x') actLog.push(`${idx}=${partOfActiveConnections}`);
         }
     }
+    if (LOG) {
+        evalRates(trackOwner); // points/turn the current tracks pay: compare with the next turn's score change
+        let own = '';
+        for (let i = 0; i < N; i++) own += trackOwner[i] < 0 ? '.' : trackOwner[i];
+        const inst: string[] = [], ink: number[] = [], seenR = new Set<number>();
+        for (let i = 0; i < N; i++) {
+            const r = regionOf[i];
+            if (seenR.has(r)) continue;
+            seenR.add(r);
+            if (instability[i] > 0) inst.push(`${r}:${instability[i]}`);
+            if (isInked[i]) ink.push(r);
+        }
+        logLine('T', `${turnNo} me=${myScore} foe=${foeScore} pred=${rate0}/${rate1} id=${myId}`);
+        logLine('OWN', own);
+        logLine('INST', inst.join(',') || '-');
+        logLine('INKED', ink.join(',') || '-');
+        logLine('ACT', actLog.join(';') || '-');
+        dbgInfo = '';
+    }
+    trackFoeHits();
+    lastHit = -1; // set again by planDisrupt if I disrupt this turn
     const plan = planPlacements(t0);
     for (const c of plan.cells) cmd.place(c % width, (c / width) | 0);
     planDisrupt(applyMoves(trackOwner, plan.cells, myId, [], 1 - myId), plan.myC, plan.foeC, t0);
 
+    if (turnNo === 1) warmUp(t0); // stays well inside the 1000 ms first-turn limit even on a slow judge
+
     // adapt effort to how long this turn really took, and say so when protection was active
     const took = elapsed(t0);
-    if (took >= SLOW_MS) { level = Math.min(2, level + (took > 40 ? 2 : 1)); calmTurns = 0; guardHit = true; }
+    if (turnNo === 1) { /* first turn has a 1000 ms limit and a cold JIT: do not react to it */ }
+    else if (took >= SLOW_MS) { level = Math.min(2, level + (took > 40 ? 2 : 1)); calmTurns = 0; guardHit = true; }
     else if (took < SOFT_MS && ++calmTurns >= 5 && level > 0) { level--; calmTurns = 0; }
-    if (guardHit || level > 0) cmd.message(`time guard lvl ${level} ${took}ms`);
+    if (turnNo > 1 && (guardHit || level > 0)) cmd.message(`time guard lvl ${level} ${took}ms`);
     guardHit = false;
+    if (LOG) logLine('DBG', `lvl=${level} took=${took}ms ${dbgInfo}`);
 
     // Write an action using console.log()
     // To debug: console.error('Debug messages...');
