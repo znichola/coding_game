@@ -487,8 +487,8 @@ function planPlacements(t0: number) {
 
 const POT_W = 0.3;    // weight of routes not built yet, relative to tracks already on active paths
 const MY_ROUTE_W = 2; // routes I still want to build count double against inking their region
-const FOE_SUNK_W = 3; // bonus per paint point of foe tracks an inking would wash away
-const SUNK_W = 0.5;     // penalty per paint point of my tracks that inking would wash away
+const FOE_SUNK_W = 1; // bonus per paint point of foe tracks an inking would wash away
+const SUNK_W = 1;     // penalty per paint point of my tracks that inking would wash away
 const STICKY = 0.6;   // keep the current target unless another is this much better
 
 const regionHasTown = new Set<number>();

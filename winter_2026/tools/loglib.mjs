@@ -3,11 +3,15 @@
 import fs from 'node:fs';
 
 export function parseLog(file) {
-  const raw = fs.readFileSync(file, 'utf8').split(/\r?\n/);
+  let text0 = fs.readFileSync(file, 'utf8');
+  if (text0.includes('outputLine')) text0 = text0.replace(/<\/div>/g, '\n').replace(/<[^>]*>/g, '').replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&');
+  const raw = text0.split(/\r?\n/);
   const init = [];
   const turns = [];
   let cur = null;
   for (const line of raw) {
+    const mm = line.match(/#MAP (.*)$/);
+    if (mm) { init.push(...mm[1].split('|')); continue; }
     const m = line.match(/#(INKED|INST|OWN|ACT|DBG|OUT|IN|T)(?: (.*))?$/);
     if (!m) continue;
     const tag = m[1], text = m[2] ?? '';

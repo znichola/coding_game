@@ -1,6 +1,7 @@
 import { Worker, MessageChannel } from 'node:worker_threads';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
+import { parseLog } from './loglib.mjs';
 
 const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
 const botUrl = f => pathToFileURL(path.resolve(f)).href; // path relative to the current directory
@@ -9,6 +10,13 @@ import fs from 'node:fs';
 function rng(seed) { let s = seed >>> 0; return () => ((s = (Math.imul(s, 1664525) + 1013904223) >>> 0) / 4294967296); }
 
 function genMap(seed) {
+  if (process.env.MAPLOG) { // play on the exact map recorded in a real game log
+    const g = parseLog(process.env.MAPLOG);
+    return { W: g.W, H: g.H, terr: g.terrain, reg: g.regionOf, towns: g.towns.map(t => ({ ...t })) };
+  }
+  return genMapRandom(seed);
+}
+function genMapRandom(seed) {
   const r = rng(seed);
   const W = 21 + Math.floor(r() * 10), H = 14 + Math.floor(r() * 7);
   const N = W * H;

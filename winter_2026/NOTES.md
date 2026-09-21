@@ -103,3 +103,30 @@ Constraints: 50 ms per turn (1000 ms first turn); 21<=width<=30; 14<=height<=20;
 - The foe pumped one region from turn 1 (4 hits in a row) and inked my early route there at turn 6, so I scored 0 that turn. Fix: `trackFoeHits` detects regions whose instability rose without my hit; after FOE_STREAK_DOOM (2) consecutive foe hits the region is treated as impassable (`doomed`) for route planning.
 - Turn 2 took 71 ms (cold JIT). Fix: `warmUp` replays the first turn's planning for up to ~300 ms (the first turn allows 1000 ms) and discards results.
 - tools/loglib.mjs now also reads the raw HTML dump from the CodinGame console; save the page fragment to a file and run `node tools/analyze.mjs file`.
+
+## Self-battle tests (tools/versus.mjs)
+`node tools/versus.mjs [candidate.ts] [opponent.ts] [games]` runs 3 region densities (REG_DIV 12/22/40), sides swapped.
+`tools/prev.ts` = last accepted bot, `tools/hunter.ts` = prev but always inks the region holding most of my tracks
+(mimics the real foe). Noise is high (12 games/density ~ +-2 wins): only trust >=70% over 36+ games.
+Preemptive routing (`PREEMPT` in main.ts: plan as if doomed / instability-3 regions were already inked): 56% vs prev,
+50% vs hunter -> no proven gain, left off.
+
+`tools/old_main.ts` = best accepted bot (baseline for versus.mjs). Shared-corridor routing (variant 3 in candidatePaths,
+kept in tools/experiment_shared.ts) scored 44% and 39% vs it over 36 games each -> rejected.
+
+## Second real log (loss_log.html; final seen 612-530 for me)
+The foe inks the region holding my scoring route in 4 consecutive hits (regions 27,34,4,24: inst 1,2,3,4 on consecutive turns),
+each ink dropping my rate by ~40 (t14) or to 0. My own inks hit regions with 1-2 foe tracks and never dented its rate.
+Change: one foe hit on a region holding my tracks = doomed (bypass planned at once, PREEMPT on). Self-play 56%/61%: weak.
+
+## TODO idea (user-approved): time-aware doom
+Instead of a hard doomed flag, value building through a hit region by points it can still earn before the ink lands
+(turns until ink = INK_AT - instability, assuming the foe keeps pumping) vs. paint/turns to finish the route.
+Keep using the region when a route can finish and pay in time; reroute only when it cannot.
+
+## Real-map testing (third log, loss_log.html: 29x19, 11 towns, 61 pairs, 61 regions)
+`LOG=true` now emits the map as one `#MAP` line so the log is complete. `MAPLOG=<log> node tools/referee.mjs a b n` (or
+`node tools/mapvs.mjs <log> [cand] [opp] [games]`) plays on that exact map. Noise ~ +-4 wins per 20 games.
+Tuning vs old_main on that map: LIFETIME 8->5, FOE_SUNK_W 1->3, SUNK_W 2->1 (0.5 was 39% on random maps and self-inks more: rejected) gave ~65-75% (random maps: 50%, no harm).
+Rejected: shared-corridor routing (6-6), LIFETIME 14, POT_W 0.6, PROGRESS_W 1, COMMIT_BONUS 1.2/2.5, STICKY 0.3, SUNK_W 0.
+Arena run showed the foe earning ~2x points per track: dense shared lines. old_main.ts = bot before this round, best.ts/best2.ts = steps.

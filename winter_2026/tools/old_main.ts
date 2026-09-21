@@ -7,8 +7,7 @@
 const LOG = false;
 const logLine = (tag: string, text: string) => { if (LOG) console.error(`#${tag} ${text}`); };
 let initDone = false;
-const initLines: string[] = [];
-const input = (): string => { const l = readline(); if (LOG && !initDone) initLines.push(l); return l; };
+const input = (): string => { const l = readline(); if (LOG && !initDone) console.error('#IN ' + l); return l; };
 let dbgInfo = '';
 
 const myId: number = parseInt(input()); // 0 or 1
@@ -38,8 +37,6 @@ for (let i = 0; i < townCount; i++) {
     towns.set(townId, { id: townId, x: townX, y: townY, wants });
 }
 initDone = true;
-// The whole init goes out as ONE line (the console truncates long multi-line logs): '#MAP <lines joined by |>'
-if (LOG) console.error('#MAP ' + initLines.join('|'));
 
 // ---------------------------------------------------------------- A*
 
@@ -194,7 +191,7 @@ const cmd = new Commands();
 const TERRAIN_COST = [1, 2, 3]; // plains, river, mountain
 const PAINT_PER_TURN = 3;
 const COMMIT_BONUS = 1.6; // ranking boost for continuing the route we were building last turn
-const LIFETIME = 5;  // turns a connection is assumed to survive (inking, foe shortcuts): earlier completion is worth more
+const LIFETIME = 8;  // turns a connection is assumed to survive (inking, foe shortcuts): earlier completion is worth more
 const TOTAL_TURNS = 100;
 const INK_AT = 4; // instability at which a region is inked out
 const N = width * height;
@@ -410,7 +407,7 @@ let lastTarget: Set<number> | null = null; // cells still missing on the route w
 // Every stage also checks the clock and bails out early; the turn still prints a valid line.
 const SOFT_MS = 16;   // stop optional refinement (follow-up ply, exact disruption values)
 const HARD_MS = 26;   // stop the lookahead altogether
-const SLOW_MS = 36;   // a turn this slow raises the level for the next turn
+const SLOW_MS = 30;   // a turn this slow raises the level for the next turn
 let level = 0;
 let calmTurns = 0;
 let guardHit = false; // set whenever protection cut work short this turn
@@ -421,7 +418,7 @@ const PROGRESS_W = 0.25;
  * Plan as if regions that are about to be inked already were: doomed ones (the foe is pumping them) and ones one hit
  * from inking. Routes through them then stop counting, so the planner builds the bypass BEFORE the ink lands.
  */
-const PREEMPT = true;  // plan as if doomed regions were already inked (weak gain in self-play: 56% vs old_main, 61% vs hunter)
+const PREEMPT = false; // tested: no measurable gain yet (see NOTES), so off
 function foresight(owner: Int8Array): Int8Array {
     if (!PREEMPT) return owner;
     const o = owner.slice();
@@ -487,8 +484,8 @@ function planPlacements(t0: number) {
 
 const POT_W = 0.3;    // weight of routes not built yet, relative to tracks already on active paths
 const MY_ROUTE_W = 2; // routes I still want to build count double against inking their region
-const FOE_SUNK_W = 3; // bonus per paint point of foe tracks an inking would wash away
-const SUNK_W = 0.5;     // penalty per paint point of my tracks that inking would wash away
+const FOE_SUNK_W = 1; // bonus per paint point of foe tracks an inking would wash away
+const SUNK_W = 2;     // penalty per paint point of my tracks that inking would wash away
 const STICKY = 0.6;   // keep the current target unless another is this much better
 
 const regionHasTown = new Set<number>();
@@ -515,7 +512,7 @@ function trackFoeHits() {
         // cumulative, not consecutive: instability never decays, and the foe skips a turn now and then (real log: 0,3,4,5)
         if (foeHits > 0) foeStreak.set(r, (foeStreak.get(r) ?? 0) + foeHits);
         prevInst.set(r, v);
-        const dead = (foeStreak.get(r) ?? 0) >= FOE_STREAK_DOOM && v < INK_AT; // one hit still leaves ~3 scoring turns: keep using it
+        const dead = (foeStreak.get(r) ?? 0) >= FOE_STREAK_DOOM && v < INK_AT;
         for (const c of cells) doomed[c] = dead ? 1 : 0;
     }
 }
@@ -587,7 +584,7 @@ function warmUp(t0: number) {
     const saved = { lastTarget, disruptTarget, lastHit, level };
     const mark = cmd.mark();
     const start = Date.now();
-    for (let i = 0; i < 200 && Date.now() - start < 550 && Date.now() - t0 < 700; i++) {
+    for (let i = 0; i < 60 && Date.now() - start < 300 && Date.now() - t0 < 450; i++) {
         const t = Date.now();
         const plan = planPlacements(t);
         planDisrupt(applyMoves(trackOwner, plan.cells, myId, [], 1 - myId), plan.myC, plan.foeC, t);
@@ -649,7 +646,7 @@ while (true) {
     // adapt effort to how long this turn really took, and say so when protection was active
     const took = elapsed(t0);
     if (turnNo === 1) { /* first turn has a 1000 ms limit and a cold JIT: do not react to it */ }
-    else if (took >= SLOW_MS) { level = Math.min(2, level + (took > (turnNo <= 3 ? 48 : 46) ? 2 : 1)); calmTurns = 0; guardHit = true; }
+    else if (took >= SLOW_MS) { level = Math.min(2, level + (took > 40 ? 2 : 1)); calmTurns = 0; guardHit = true; }
     else if (took < SOFT_MS && ++calmTurns >= 5 && level > 0) { level--; calmTurns = 0; }
     if (turnNo > 1 && (guardHit || level > 0)) cmd.message(`time guard lvl ${level} ${took}ms`);
     guardHit = false;
